@@ -8,20 +8,23 @@
 #  ╚═╝     ╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝
 #
 #  Hybrid OSINT & Website Reconnaissance Utility
-#  Version : 2.0.0
+#  Version : 2.1.0
 #  Author  : Pickaxe Project
 #  License : MIT
 #  Target  : Termux (Android) | Linux
 # =============================================================================
 
 import asyncio
+import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from rich import box
@@ -188,7 +191,6 @@ def check_dependencies(tools: list[str] | None = None) -> tuple[list[str], list[
 def print_dependency_report() -> bool:
     """Print a rich dependency table. Returns True if all deps satisfied."""
     found, missing = check_dependencies()
-    pm = _detect_pkg_manager()
 
     tbl = Table(
         title="[header] System Dependency Check [/header]",
@@ -198,34 +200,93 @@ def print_dependency_report() -> bool:
         border_style="bright_blue",
         expand=False,
     )
-    tbl.add_column("Tool",    style="field",   width=12)
-    tbl.add_column("Status",  style="value",   width=10)
-    tbl.add_column("Install Command",           width=50)
+    tbl.add_column("Tool",   style="field",   width=12)
+    tbl.add_column("Status", style="value",   width=14)
+    tbl.add_column("Binary Path / Note",       width=46)
 
     for tool in REQUIRED_TOOLS:
         if tool in found:
-            tbl.add_row(tool, "[success]✔ Found[/success]", "")
+            binary = shutil.which("dig" if tool == "dig" else tool) or "in PATH"
+            tbl.add_row(tool, "[success]✔  Found[/success]", f"[muted]{binary}[/muted]")
         else:
-            install_cmd = REQUIRED_TOOLS[tool].get(pm, REQUIRED_TOOLS[tool]["apt"])
-            tbl.add_row(
-                tool,
-                "[error]✘ Missing[/error]",
-                f"[yellow]{install_cmd}[/yellow]",
-            )
+            tbl.add_row(tool, "[error]✘  Missing[/error]", "[yellow]run: bash setup.sh[/yellow]")
 
     console.print(tbl)
+    return len(missing) == 0
 
-    if missing:
+
+def _find_setup_sh() -> Path | None:
+    """Locate setup.sh relative to this script or cwd."""
+    candidates = [
+        Path(__file__).parent / "setup.sh",
+        Path.cwd() / "setup.sh",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
+def auto_install_prompt(missing: list[str]) -> bool:
+    """
+    Offer to run setup.sh automatically when tools are missing.
+    Returns True if the user approved and setup ran successfully.
+    """
+    setup_path = _find_setup_sh()
+
+    console.print()
+    console.print(Panel(
+        f"[error]✘  Missing tools detected:[/error] [bold]{', '.join(missing)}[/bold]\n\n"
+        "[info]Pickaxe can install everything automatically right now.[/info]\n"
+        f"  Setup script: [cyan]{setup_path or 'setup.sh (not found in current dir)'}[/cyan]",
+        title="[warning]⚠  Dependencies Missing[/warning]",
+        border_style="yellow",
+    ))
+
+    if not setup_path:
         console.print(
-            Panel(
-                f"[warning]⚠  Missing tools: {', '.join(missing)}\n"
-                "Install them using the commands above and re-run.[/warning]",
-                border_style="yellow",
-                title="[warning]Action Required[/warning]",
-            )
+            "[error]setup.sh not found.[/error] "
+            "Clone the full repo and run [cyan]bash setup.sh[/cyan] manually."
         )
         return False
-    return True
+
+    # Interactive prompt — skip if stdin is not a TTY (e.g. piped)
+    if not sys.stdin.isatty():
+        console.print("[muted]Non-interactive mode — skipping auto-install.[/muted]")
+        return False
+
+    try:
+        answer = console.input(
+            "\n  [bold bright_cyan]Install all dependencies now?[/bold bright_cyan] "
+            "[bold](y/N):[/bold] "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[muted]Skipped.[/muted]")
+        return False
+
+    if answer not in ("y", "yes"):
+        console.print(
+            "[muted]Skipped. Run [cyan]bash setup.sh[/cyan] manually, then retry.[/muted]"
+        )
+        return False
+
+    console.print()
+    console.print(Rule("[info]Running setup.sh[/info]", style="bright_blue"))
+    console.print()
+
+    try:
+        ret = subprocess.run(["bash", str(setup_path)], check=False)
+        if ret.returncode == 0:
+            console.print()
+            console.print(Rule(style="bright_blue"))
+            console.print("[success]✔  setup.sh completed. Re-checking dependencies…[/success]")
+            return True
+        else:
+            console.print(f"[error]✘  setup.sh exited with code {ret.returncode}.[/error]")
+            return False
+    except FileNotFoundError:
+        console.print("[error]✘  bash not found — cannot run setup.sh.[/error]")
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -813,10 +874,15 @@ def _usage() -> None:
 
 [field]Options:[/field]
   [value]-h, --help[/value]      Show this help message
-  [value]--check[/value]         Only run dependency check and exit
+  [value]--check[/value]         Run dependency check and exit
+  [value]--install[/value]       Run setup.sh to install all dependencies and exit
   [value]--skip <modules>[/value] Comma-separated list of modules to skip
                  (nmap, whois, dig, whatweb, ping)
-  [value]--force[/value]         Skip dependency check and attempt scan anyway
+  [value]--force[/value]         Skip dependency check and scan anyway
+
+[field]First time?[/field]
+  [bright_cyan]bash setup.sh[/bright_cyan]                      # auto-installs everything
+  [bright_cyan]python hybrid_osint.py --install[/bright_cyan]   # same, from inside Python
 
 [field]Examples:[/field]
   [bright_cyan]python hybrid_osint.py example.com[/bright_cyan]
@@ -847,8 +913,28 @@ def main() -> None:
     # Dependency check only
     if "--check" in args:
         console.print(BANNER)
-        print_dependency_report()
-        sys.exit(0)
+        ok = print_dependency_report()
+        if not ok:
+            console.print(
+                "\n[info]Tip:[/info] Run [cyan]bash setup.sh[/cyan] or "
+                "[cyan]python hybrid_osint.py --install[/cyan] to fix missing tools."
+            )
+        sys.exit(0 if ok else 1)
+
+    # Install mode — run setup.sh and exit
+    if "--install" in args:
+        console.print(BANNER)
+        setup_path = _find_setup_sh()
+        if not setup_path:
+            console.print(
+                "[error]✘  setup.sh not found.[/error] "
+                "Make sure setup.sh is in the same directory as hybrid_osint.py."
+            )
+            sys.exit(1)
+        console.print(f"[info]  Running:[/info] [cyan]{setup_path}[/cyan]")
+        console.print(Rule(style="bright_blue"))
+        ret = subprocess.run(["bash", str(setup_path)], check=False)
+        sys.exit(ret.returncode)
 
     # Parse flags
     force  = "--force" in args
@@ -878,16 +964,27 @@ def main() -> None:
     console.print(Rule(style="bright_blue"))
     console.print()
 
-    # ─── Dependency check
+    # ─── Dependency check + auto-install prompt
     if not force:
         found, missing = check_dependencies()
         tools_to_skip = [t for t in missing if t not in skip]
+
         if tools_to_skip:
             print_dependency_report()
-            console.print(
-                f"\n[warning]⚠  Missing tools will be auto-skipped:[/warning] "
-                f"[muted]{', '.join(tools_to_skip)}[/muted]"
-            )
+
+            # Offer to run setup.sh automatically
+            installed = auto_install_prompt(tools_to_skip)
+
+            if installed:
+                # Re-check after install
+                found2, still_missing = check_dependencies()
+                tools_to_skip = [t for t in still_missing if t not in skip]
+                if tools_to_skip:
+                    console.print(
+                        f"[warning]⚠  Still missing after install (will skip):[/warning] "
+                        f"[muted]{', '.join(tools_to_skip)}[/muted]"
+                    )
+            # Whatever is still missing gets skipped rather than crashing
             skip = list(set(skip + tools_to_skip))
             console.print()
 

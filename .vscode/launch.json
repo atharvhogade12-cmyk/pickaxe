@@ -1,0 +1,59 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "⛏ Pickaxe — Full Scan",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/hybrid_osint.py",
+            "args": ["example.com"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "⛏ Pickaxe — Dependency Check",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/hybrid_osint.py",
+            "args": ["--check"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "⛏ Pickaxe — Install Dependencies",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/hybrid_osint.py",
+            "args": ["--install"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "⛏ Pickaxe — Skip Nmap & Ping",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/hybrid_osint.py",
+            "args": ["--skip", "nmap,ping", "example.com"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "⛏ Pickaxe — DNS + WHOIS only",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/hybrid_osint.py",
+            "args": ["--skip", "nmap,whatweb,ping", "example.com"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "⛏ Pickaxe — Force Run",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/hybrid_osint.py",
+            "args": ["--force", "example.com"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

@@ -1,0 +1,10 @@
+# Pickaxe — Hybrid OSINT & Web Reconnaissance Utility
+# Python Package Requirements
+# Install with: pip install -r requirements.txt
+
+# ─── Core UI ──────────────────────────────────────────────────────────────────
+rich>=13.7.0          # Console rendering, tables, progress bars, panels
+
+# ─── Optional: faster async I/O on Python < 3.12 ─────────────────────────────
+# uvloop>=0.19.0      # Uncomment on Linux for ~2x asyncio speed boost
+                      # (Not available on Windows; skip in Termux if install fails)

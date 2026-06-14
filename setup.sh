@@ -29,8 +29,7 @@
 # ── Safety — DON'T use -e so we handle errors ourselves ──────────────────────
 set -uo pipefail
 
-# ── Use $TMPDIR on Termux; fallback to /tmp on Linux ─────────────────────────
-# FIX: /tmp is not always writable on Termux — use $TMPDIR
+# log goes here, idk why /tmp breaks on termux but it does
 PICKAXE_LOG="${TMPDIR:-/tmp}/pickaxe_install.log"
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
@@ -42,7 +41,6 @@ success() { echo -e "${GREEN}  ✔${NC}  $*"; }
 warn()    { echo -e "${YELLOW}  ⚠${NC}  $*"; }
 err()     { echo -e "${RED}  ✘${NC}  $*"; }
 
-# FIX: Use local variable so ${#msg} gives correct string length (not param count)
 section() {
     local msg="$*"
     local len=${#msg}
@@ -124,14 +122,14 @@ try_run() {
 }
 
 # =============================================================================
-#  GEM PATH FIXER — export and persist WhatWeb gem bin dir
+#  GEM PATH STUFF
 # =============================================================================
-# FIX: After gem install, the bin dir is NOT in $PATH by default.
-#      This function detects and exports it, then appends to shell rc.
+# gem installs to some random dir that's not in PATH by default
+# this tries to find it and add it, idk why gem doesn't just do this itself
 fix_gem_path() {
     local gem_bin_dir=""
 
-    # Method 1: Ask gem for its environment
+    # ask gem where it put its stuff
     if has gem; then
         local gemdir
         gemdir=$(gem environment gemdir 2>/dev/null)
@@ -140,7 +138,7 @@ fix_gem_path() {
         fi
     fi
 
-    # Method 2: Termux-specific gem path
+    # termux puts ruby gems somewhere completely different
     if [ -z "$gem_bin_dir" ] && [ "$ENV" = "termux" ]; then
         local prefix="${PREFIX:-/data/data/com.termux/files/usr}"
         # Look for ruby gem installations under the prefix
@@ -164,7 +162,7 @@ fix_gem_path() {
         fi
     fi
 
-    # Method 3: Glob HOME for gem bin dirs
+    # brute force it, just check common gem dirs
     if [ -z "$gem_bin_dir" ]; then
         for candidate in "${HOME}/.gem/ruby"/*/bin; do
             if [ -d "$candidate" ]; then
@@ -210,8 +208,10 @@ fix_gem_path() {
 }
 
 # =============================================================================
-#  WHATWEB VIA GEM (universal fallback)
+#  WHATWEB
 # =============================================================================
+# whatweb isn't always in apt so we fall back to installing via gem
+# ruby needs to already be there for this to work obviously
 install_whatweb_gem() {
     if ! has ruby; then
         err "Ruby not found — WhatWeb gem install skipped."
@@ -435,9 +435,10 @@ setup_unknown() {
 #  PIP / PYTHON BOOTSTRAPPER
 # =============================================================================
 bootstrap_pip() {
-    section "Python — Bootstrapping pip"
+    section "Python pip check"
 
     local PY=""
+    # find whatever python we have, try newest first
     for candidate in python3 python python3.12 python3.11 python3.10 python3.9; do
         if has "$candidate"; then
             PY="$candidate"
@@ -464,7 +465,7 @@ bootstrap_pip() {
         return 0
     fi
 
-    warn "ensurepip failed — fetching get-pip.py …"
+    warn "ensurepip also broke, downloading get-pip.py the old fashioned way..."
     local GETPIP="${TMPDIR:-/tmp}/get-pip.py"
     if has curl; then
         curl -sSL https://bootstrap.pypa.io/get-pip.py -o "$GETPIP" \
@@ -619,9 +620,10 @@ set_permissions() {
 }
 
 # =============================================================================
-#  REPAIR MODE — install only missing tools
+#  REPAIR MODE
 # =============================================================================
-# FIX: --repair now properly implemented (was falling through to full install)
+# run with --repair to only install what's missing
+# useful when one thing broke and you don't wanna reinstall everything
 repair_missing() {
     section "REPAIR MODE — Checking for missing tools"
 

@@ -55,19 +55,16 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  VERSION
-# ─────────────────────────────────────────────────────────────────────────────
+# version string, bump this whenever you push something
 
 VERSION = "3.0.0"
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  GLOBAL THEME & CONSOLE
-# ─────────────────────────────────────────────────────────────────────────────
+# rich theme stuff — colors for the terminal output
+# took forever to get these right, don't touch
 
 CUSTOM_THEME = Theme({
     "banner":       "bold bright_cyan",
-    "header":       "bold bright_white",           # hex bg removed — breaks non-truecolor terminals
+    "header":       "bold bright_white",           # was using hex colors but broke on some terminals
     "success":      "bold bright_green",
     "warning":      "bold yellow",
     "error":        "bold bright_red",
@@ -76,12 +73,12 @@ CUSTOM_THEME = Theme({
     "field":        "bold cyan",
     "value":        "bright_white",
     "section":      "bold magenta",
-    "cve":          "bold bright_red",              # hex bg removed — breaks non-truecolor terminals
+    "cve":          "bold bright_red",              # was red bg but looked weird on light terminals
     "port_open":    "bold green",
     "port_closed":  "dim red",
     "dns_record":   "bright_yellow",
     "cms":          "bold bright_magenta",
-    "highlight":    "bold bright_cyan",             # hex bg removed — breaks non-truecolor terminals
+    "highlight":    "bold bright_cyan",             # same, dropped the bg
     "phish_low":    "bold bright_green",
     "phish_sus":    "bold yellow",
     "phish_likely": "bold orange1",
@@ -97,9 +94,9 @@ CUSTOM_THEME = Theme({
 
 console = Console(theme=CUSTOM_THEME, highlight=False)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  CONSTANTS — PHISHING ENGINE
-# ─────────────────────────────────────────────────────────────────────────────
+# phishing detection lists
+# grabbed most of these from various threat intel blogs, idk all of them by heart
+# TODO: probably should update these more often
 
 SUSPICIOUS_TLDS = {
     ".xyz", ".top", ".click", ".tk", ".ml", ".ga", ".cf", ".gq", ".pw",
@@ -151,9 +148,8 @@ SECURITY_HEADERS: Dict[str, Tuple[str, str]] = {
     "Cross-Origin-Resource-Policy": ("CORP",     "Controls cross-origin resource sharing"),
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  REQUIRED TOOLS
-# ─────────────────────────────────────────────────────────────────────────────
+# install commands per tool per distro
+# if something breaks just google "install nmap on [your os]"
 
 REQUIRED_TOOLS: Dict[str, Dict[str, str]] = {
     "nmap": {
@@ -188,9 +184,8 @@ REQUIRED_TOOLS: Dict[str, Dict[str, str]] = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DATA CONTAINERS
-# ─────────────────────────────────────────────────────────────────────────────
+# dataclass that holds everything from the scan
+# just add fields here if you need to store more stuff
 
 @dataclass
 class ScanResult:
@@ -480,7 +475,7 @@ def _ssl_check_sync(hostname: str) -> Dict[str, Any]:
                 if expire_str:
                     try:
                         exp_dt    = datetime.strptime(expire_str, "%b %d %H:%M:%S %Y %Z")
-                        # datetime.utcnow() is deprecated in 3.12, use timezone-aware version
+                        # apparently utcnow() is deprecated now lol, found this fix on stackoverflow
                         days_left = (exp_dt - datetime.now(timezone.utc).replace(tzinfo=None)).days
                     except ValueError:
                         pass
@@ -506,7 +501,7 @@ def _ssl_check_sync(hostname: str) -> Dict[str, Any]:
 
 
 def _http_headers_sync(hostname: str, use_https: bool = True) -> Dict[str, Any]:
-    """Blocking HTTP HEAD request to retrieve response headers."""
+    """get http headers"""
     try:
         if use_https:
             ctx  = ssl_lib.create_default_context()
@@ -523,7 +518,7 @@ def _http_headers_sync(hostname: str, use_https: bool = True) -> Dict[str, Any]:
 
 
 def _geoip_sync(ip: str) -> Dict[str, Any]:
-    """GeoIP lookup via ip-api.com — free, no API key, 45 req/min limit."""
+    """geo lookup thingy"""
     fields = "status,message,country,regionName,city,isp,org,as,query"
     url    = f"http://ip-api.com/json/{ip}?fields={fields}"
     try:
@@ -542,22 +537,23 @@ def _geoip_sync(ip: str) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ASYNC SCAN RUNNERS
+#  async workers
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def run_nmap(target: str, result: ScanResult, timeout: int = 240) -> None:
-    """Full TCP scan + version detection + vuln scripts. Termux/non-root safe."""
+    """run nmap scan"""
     console.log("[info]↳ Nmap:[/info] launching...")
 
     non_root = is_termux() or not is_root()
     if non_root:
-        # non-root requires TCP connect on specific ports
+        # no root = no SYN scans, stick to TCP connect
+        # scanning 1000 ports without root is just a waste of time usually
         flags = ["-sT", "-sV", "--open", "-T4",
                  "-p", "21,22,23,25,80,443,3306,3389,5432,6379,8080,8443,8888,9200",
                  "-oN", "-"]
         console.log("[warning]↳ Nmap:[/warning] non-root — TCP connect on common ports, OS detection skipped")
     else:
-        # root mode allows faster SYN scans
+        # root = can do proper SYN scan, much faster
         flags = ["-sS", "-sV", "-O", "--open", "-T4", "-oN", "-"]
 
     stdout, stderr = await _run_subprocess(["nmap"] + flags + [target], timeout=timeout)
@@ -573,7 +569,7 @@ async def run_nmap(target: str, result: ScanResult, timeout: int = 240) -> None:
 
 
 async def run_whois(target: str, result: ScanResult, timeout: int = 30) -> None:
-    """WHOIS domain registration data."""
+    """look up domain owner info"""
     console.log("[info]↳ WHOIS:[/info] launching...")
     stdout, stderr = await _run_subprocess(["whois", target], timeout=timeout)
     if stderr and not stdout:
@@ -586,7 +582,7 @@ async def run_whois(target: str, result: ScanResult, timeout: int = 30) -> None:
 
 
 async def run_dig(target: str, result: ScanResult, timeout: int = 20) -> None:
-    """DNS enumeration — A, AAAA, MX, NS, TXT, CNAME, SOA records."""
+    """dns info stuff"""
     console.log("[info]↳ DNS:[/info] launching...")
 
     async def _dig(qtype: str) -> str:
@@ -605,16 +601,16 @@ async def run_dig(target: str, result: ScanResult, timeout: int = 20) -> None:
 
 
 async def run_whatweb(target: str, result: ScanResult, timeout: int = 60) -> None:
-    """WhatWeb technology fingerprinting with fallback mode."""
+    """what tech is this site running"""
     console.log("[info]↳ WhatWeb:[/info] launching...")
     url = target if target.startswith(("http://", "https://")) else f"http://{target}"
 
-    # Try brief mode first
+    # try brief mode
     stdout, stderr = await _run_subprocess(
         ["whatweb", "-a", "3", "--log-brief=-", url], timeout=timeout
     )
 
-    # Fallback to plain mode if brief returns nothing useful
+    # fallback if empty
     if not stdout or stdout.strip() in ("", url):
         stdout2, stderr2 = await _run_subprocess(
             ["whatweb", "-a", "3", url], timeout=timeout
@@ -633,15 +629,12 @@ async def run_whatweb(target: str, result: ScanResult, timeout: int = 60) -> Non
 
 
 async def run_ping(target: str, result: ScanResult) -> None:
-    """ICMP latency check — platform-aware flags for Termux/Linux/macOS."""
+    """check if it responds to ping"""
     console.log("[info]↳ Ping:[/info] launching...")
 
-    # Build platform-correct ping command
     if platform.system() == "Darwin":
-        # macOS: -W timeout in ms, requires integer
         cmd = ["ping", "-c", "4", "-W", "2000", target]
     else:
-        # Linux / Termux / BSD: -W timeout in seconds
         cmd = ["ping", "-c", "4", "-W", "3", target]
 
     stdout, stderr = await _run_subprocess(cmd, timeout=20)
@@ -653,10 +646,8 @@ async def run_ping(target: str, result: ScanResult) -> None:
         console.log("[warning]↳ Ping:[/warning] no response — ICMP may be filtered")
         return
 
-    # Linux/Termux: "rtt min/avg/max/mdev = 1.2/2.3/3.4/0.5 ms"
     rtt = re.search(r"rtt min/avg/max(?:/mdev)?\s*=\s*[\d.]+/([\d.]+)/", stdout)
     if not rtt:
-        # macOS: "round-trip min/avg/max/stddev = 1.2/2.3/3.4/0.5 ms"
         rtt = re.search(r"round-trip min/avg/max/\S+\s*=\s*[\d.]+/([\d.]+)/", stdout)
 
     result.ping_latency = (f"{rtt.group(1)} ms") if rtt else "?"
@@ -666,7 +657,7 @@ async def run_ping(target: str, result: ScanResult) -> None:
 
 
 async def run_ssl(target: str, result: ScanResult) -> None:
-    """SSL/TLS certificate inspection — stdlib only, no extra dependencies."""
+    """ssl details"""
     console.log("[info]↳ SSL:[/info] launching...")
     hostname = re.sub(r"^https?://", "", target).split("/")[0].split(":")[0]
 
@@ -695,12 +686,11 @@ async def run_ssl(target: str, result: ScanResult) -> None:
 
 
 async def run_http_headers(target: str, result: ScanResult) -> None:
-    """HTTP security header analysis via HEAD request."""
+    """check security headers"""
     console.log("[info]↳ HTTP Headers:[/info] launching...")
     hostname = re.sub(r"^https?://", "", target).split("/")[0].split(":")[0]
     loop     = asyncio.get_event_loop()
 
-    # Try HTTPS first, then HTTP
     data: Dict[str, Any] = await loop.run_in_executor(None, _http_headers_sync, hostname, True)
     if "error" in data:
         data = await loop.run_in_executor(None, _http_headers_sync, hostname, False)
@@ -720,24 +710,22 @@ async def run_http_headers(target: str, result: ScanResult) -> None:
 
 
 async def run_subdomains(target: str, result: ScanResult, timeout: int = 5) -> None:
-    """Async subdomain brute-force using a built-in wordlist + dig."""
+    """brute force subdomains"""
     console.log(f"[info]↳ Subdomains:[/info] launching ({len(COMMON_SUBDOMAINS)} probes)...")
 
-    # Extract base domain (last 2 labels)
     clean = re.sub(r"^https?://", "", target).split("/")[0].split(":")[0]
     parts = clean.split(".")
     base  = ".".join(parts[-2:]) if len(parts) >= 2 else clean
 
-    # Semaphore limits concurrent subprocesses (avoid Termux OOM)
     sem = asyncio.Semaphore(12)
 
-    # filter out common wildcard DNS ranges
+    # filter common junk
     _BOGON_PREFIXES: Tuple[str, ...] = (
         "192.0.2.",    # test ranges
         "198.51.100.",
         "203.0.113.",
-        "127.",        # loopback
-        "0.",          # invalid
+        "127.",        # local loopback
+        "0.",          # ignore invalid
     )
 
     async def _check(sub: str) -> Optional[str]:
@@ -750,9 +738,9 @@ async def run_subdomains(target: str, result: ScanResult, timeout: int = 5) -> N
                      if l.strip() and not l.strip().startswith(";")]
             if lines and re.match(r"[\d.]+", lines[0]):
                 ip = lines[0]
-                # Filter wildcard DNS false positives
+                # skip fake IPs
                 if any(ip.startswith(prefix) for prefix in _BOGON_PREFIXES):
-                    return None  # wildcard DNS hit
+                    return None
                 return f"{fqdn} [{ip}]"
         return None
 
@@ -1177,7 +1165,8 @@ def _make_header(result: ScanResult) -> Panel:
     if result.geo_country:
         location = ", ".join(filter(None, [result.geo_city, result.geo_region, result.geo_country]))
         grid.add_row(
-            # shows CDN edge location, not necessarily where the company is based
+            # this shows CDN edge node location btw, not the actual company HQ
+            # idk why people expect it to show hq lol
             Text(f"  🌍  Anycast Node Location: {location}", style="geo_info"),
             Text(f"🏢  {result.geo_isp[:42]}" if result.geo_isp else "", style="muted"),
         )

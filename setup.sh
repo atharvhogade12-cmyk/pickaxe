@@ -9,7 +9,7 @@
 #
 #  Pickaxe OSINT — Zero-Touch Dependency Installer v3.0
 #  ONE command installs EVERYTHING. No manual steps.
-#  Supports: Termux (Android) | Debian/Ubuntu | Kali | Arch | RHEL/Fedora
+#  Supports: Termux | Debian/Ubuntu | Kali | Arch | RHEL/Fedora | macOS | Alpine | openSUSE
 #
 #  FIXES in v3.0:
 #   - Uses $TMPDIR instead of /tmp (critical for Termux)
@@ -76,6 +76,12 @@ print_banner() {
 detect_env() {
     if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
         echo "termux"
+    elif [ "$(uname -s)" = "Darwin" ]; then
+        echo "macos"
+    elif grep -qi "alpine" /etc/os-release 2>/dev/null || command -v apk &>/dev/null; then
+        echo "alpine"
+    elif grep -qi "opensuse\|suse" /etc/os-release 2>/dev/null || command -v zypper &>/dev/null; then
+        echo "opensuse"
     elif grep -qi "kali" /etc/os-release 2>/dev/null; then
         echo "kali"
     elif command -v apt-get &>/dev/null; then
@@ -338,13 +344,91 @@ setup_rhel() {
     install_whatweb_gem
 }
 
+# ─── macOS / Homebrew ─────────────────────────────────────────────────────────
+setup_macos() {
+    # install homebrew if missing — it's the standard package manager on mac
+    if ! has brew; then
+        warn "Homebrew not found — installing..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        # M1/M2 macs install brew to /opt/homebrew
+        if [ -f "/opt/homebrew/bin/brew" ]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+            echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> "${HOME}/.zprofile"
+        fi
+    fi
+
+    section "macOS — Installing tools via Homebrew"
+    local PKGS=(nmap whois bind ruby curl wget)
+    for pkg_name in "${PKGS[@]}"; do
+        info "brew install ${pkg_name}..."
+        if brew install "$pkg_name" > "$PICKAXE_LOG" 2>&1; then
+            success "${pkg_name} installed."
+        else
+            warn "${pkg_name}: brew said it may already be installed"
+        fi
+    done
+
+    if ! has python3; then
+        info "installing python3 via brew..."
+        brew install python3 > "$PICKAXE_LOG" 2>&1 && success "python3 installed."
+    fi
+
+    section "macOS — Installing WhatWeb"
+    install_whatweb_gem
+}
+
+# ─── Alpine Linux ─────────────────────────────────────────────────────────────
+setup_alpine() {
+    section "Alpine — Updating apk"
+    maybe_sudo apk update > "$PICKAXE_LOG" 2>&1 \
+        && success "apk index updated." \
+        || warn "apk update had issues (continuing)."
+
+    section "Alpine — Installing system tools"
+    local PKGS=(nmap whois bind-tools python3 py3-pip ruby curl wget)
+    for pkg_name in "${PKGS[@]}"; do
+        info "apk add ${pkg_name}..."
+        if maybe_sudo apk add --no-cache "$pkg_name" > "$PICKAXE_LOG" 2>&1; then
+            success "${pkg_name} installed."
+        else
+            err "Failed: ${pkg_name}"
+            FAILED_TOOLS+=("$pkg_name")
+        fi
+    done
+
+    section "Alpine — Installing WhatWeb"
+    install_whatweb_gem
+}
+
+# ─── openSUSE / SUSE ──────────────────────────────────────────────────────────
+setup_opensuse() {
+    section "openSUSE — Refreshing zypper repos"
+    maybe_sudo zypper refresh > "$PICKAXE_LOG" 2>&1 \
+        && success "repos refreshed." \
+        || warn "zypper refresh had issues (continuing)."
+
+    section "openSUSE — Installing system tools"
+    local PKGS=(nmap whois bind-utils python3 python3-pip ruby curl wget)
+    for pkg_name in "${PKGS[@]}"; do
+        info "zypper install ${pkg_name}..."
+        if maybe_sudo zypper install -y "$pkg_name" > "$PICKAXE_LOG" 2>&1; then
+            success "${pkg_name} installed."
+        else
+            err "Failed: ${pkg_name}"
+            FAILED_TOOLS+=("$pkg_name")
+        fi
+    done
+
+    section "openSUSE — Installing WhatWeb"
+    install_whatweb_gem
+}
+
 # ─── Unknown OS ───────────────────────────────────────────────────────────────
 setup_unknown() {
-    err "Could not detect your package manager."
-    echo ""
-    echo -e "  Supported: ${YELLOW}Termux, apt (Debian/Ubuntu/Kali), pacman (Arch), dnf/yum (RHEL/Fedora)${NC}"
-    echo -e "  Please open an issue at the project repo with your OS details."
-    exit 1
+    warn "couldn't detect your OS/package manager — skipping OS package install"
+    warn "you may need to manually install: nmap whois dig ruby curl wget python3"
+    info "supported package managers: apt, pacman, dnf/yum, zypper, apk, brew, pkg (Termux)"
+    # don't exit — python package install will still run below
 }
 
 # =============================================================================
@@ -438,41 +522,55 @@ install_python_packages() {
     info "Packages to install: ${PKGS[*]}"
     echo ""
 
-    # try apt first on kali/debian — avoids pip entirely
-    if [ "$ENV" = "debian" ] || [ "$ENV" = "kali" ]; then
-        info "trying apt for python packages..."
-        local APT_ALL_OK=true
-        for pkg in "${PKGS[@]}"; do
-            # strip version spec to get just the package name
-            local base_name
-            base_name=$(echo "$pkg" | sed 's/[><=!].*//' | tr '[:upper:]' '[:lower:]')
-            # map pip names to apt package names
-            local apt_pkg=""
-            case "$base_name" in
-                rich)       apt_pkg="python3-rich"       ;;
-                requests)   apt_pkg="python3-requests"   ;;
-                colorama)   apt_pkg="python3-colorama"   ;;
-                dnspython)  apt_pkg="python3-dnspython"  ;;
-                *)          apt_pkg=""                   ;;
-            esac
-            if [ -n "$apt_pkg" ]; then
-                info "apt: installing ${apt_pkg}…"
-                if maybe_sudo apt-get install -y "$apt_pkg" > "$PICKAXE_LOG" 2>&1; then
-                    success "${apt_pkg} installed via apt. No venv needed."
+    # try OS package manager first — cleanest, avoids pip + PEP 668 entirely
+    case "$ENV" in
+        debian | kali)
+            info "trying apt for python packages..."
+            local APT_ALL_OK=true
+            for pkg in "${PKGS[@]}"; do
+                local base_name
+                base_name=$(echo "$pkg" | sed 's/[><=!].*//' | tr '[:upper:]' '[:lower:]')
+                local apt_pkg=""
+                case "$base_name" in
+                    rich)       apt_pkg="python3-rich"      ;;
+                    requests)   apt_pkg="python3-requests"  ;;
+                    colorama)   apt_pkg="python3-colorama"  ;;
+                    dnspython)  apt_pkg="python3-dnspython" ;;
+                    *)          apt_pkg=""                  ;;
+                esac
+                if [ -n "$apt_pkg" ]; then
+                    info "apt: ${apt_pkg}..."
+                    if maybe_sudo apt-get install -y "$apt_pkg" > "$PICKAXE_LOG" 2>&1; then
+                        success "${apt_pkg} installed."
+                    else
+                        APT_ALL_OK=false
+                    fi
                 else
-                    warn "apt: ${apt_pkg} unavailable — will fall through to pip."
                     APT_ALL_OK=false
                 fi
-            else
-                warn "No apt mapping for '${base_name}' — needs pip."
-                APT_ALL_OK=false
+            done
+            if [ "$APT_ALL_OK" = true ]; then
+                success "all packages installed via apt"
+                return 0
             fi
-        done
-        if [ "$APT_ALL_OK" = true ]; then
-            success "All packages installed via apt. No venv needed."
-            return 0
-        fi
-    fi
+            ;;
+        alpine)
+            info "trying apk for python packages..."
+            # alpine has py3-rich in the community repo
+            if maybe_sudo apk add --no-cache py3-rich > "$PICKAXE_LOG" 2>&1; then
+                success "rich installed via apk"
+                return 0
+            fi
+            ;;
+        macos)
+            # brew python doesn't have the PEP 668 venv restriction
+            info "pip install (brew python, no venv needed)..."
+            if $PY -m pip install --quiet "${PKGS[@]}" > "$PICKAXE_LOG" 2>&1; then
+                success "packages installed"
+                return 0
+            fi
+            ;;
+    esac
 
 
     # kali/debian: use --break-system-packages to bypass the venv requirement
@@ -538,6 +636,9 @@ repair_missing() {
             debian | kali)  maybe_sudo apt-get install -y nmap > "$PICKAXE_LOG" 2>&1 && success "nmap installed." || { err "nmap failed."; FAILED_TOOLS+=("nmap"); } ;;
             arch)           maybe_sudo pacman -S --noconfirm nmap > "$PICKAXE_LOG" 2>&1 && success "nmap installed." || { err "nmap failed."; FAILED_TOOLS+=("nmap"); } ;;
             rhel | fedora)  local PM="yum"; has dnf && PM="dnf"; maybe_sudo $PM install -y nmap > "$PICKAXE_LOG" 2>&1 && success "nmap installed." || { err "nmap failed."; FAILED_TOOLS+=("nmap"); } ;;
+            macos)          brew install nmap > "$PICKAXE_LOG" 2>&1 && success "nmap installed." || warn "brew: nmap may already be installed" ;;
+            alpine)         maybe_sudo apk add --no-cache nmap > "$PICKAXE_LOG" 2>&1 && success "nmap installed." || { err "nmap failed."; FAILED_TOOLS+=("nmap"); } ;;
+            opensuse)       maybe_sudo zypper install -y nmap > "$PICKAXE_LOG" 2>&1 && success "nmap installed." || { err "nmap failed."; FAILED_TOOLS+=("nmap"); } ;;
         esac
     else
         success "nmap already installed: $(command -v nmap)"
@@ -552,6 +653,9 @@ repair_missing() {
             debian | kali)  maybe_sudo apt-get install -y whois > "$PICKAXE_LOG" 2>&1 && success "whois installed." || { err "whois failed."; FAILED_TOOLS+=("whois"); } ;;
             arch)           maybe_sudo pacman -S --noconfirm whois > "$PICKAXE_LOG" 2>&1 && success "whois installed." || { err "whois failed."; FAILED_TOOLS+=("whois"); } ;;
             rhel | fedora)  local PM="yum"; has dnf && PM="dnf"; maybe_sudo $PM install -y whois > "$PICKAXE_LOG" 2>&1 && success "whois installed." || { err "whois failed."; FAILED_TOOLS+=("whois"); } ;;
+            macos)          brew install whois > "$PICKAXE_LOG" 2>&1 && success "whois installed." || warn "brew: whois may already be installed" ;;
+            alpine)         maybe_sudo apk add --no-cache whois > "$PICKAXE_LOG" 2>&1 && success "whois installed." || { err "whois failed."; FAILED_TOOLS+=("whois"); } ;;
+            opensuse)       maybe_sudo zypper install -y whois > "$PICKAXE_LOG" 2>&1 && success "whois installed." || { err "whois failed."; FAILED_TOOLS+=("whois"); } ;;
         esac
     else
         success "whois already installed: $(command -v whois)"
@@ -566,6 +670,9 @@ repair_missing() {
             debian | kali)  maybe_sudo apt-get install -y dnsutils > "$PICKAXE_LOG" 2>&1 && success "dnsutils installed." || { err "dnsutils failed."; FAILED_TOOLS+=("dig"); } ;;
             arch)           maybe_sudo pacman -S --noconfirm bind > "$PICKAXE_LOG" 2>&1 && success "bind installed." || { err "bind failed."; FAILED_TOOLS+=("dig"); } ;;
             rhel | fedora)  local PM="yum"; has dnf && PM="dnf"; maybe_sudo $PM install -y bind-utils > "$PICKAXE_LOG" 2>&1 && success "bind-utils installed." || { err "bind-utils failed."; FAILED_TOOLS+=("dig"); } ;;
+            macos)          brew install bind > "$PICKAXE_LOG" 2>&1 && success "bind/dig installed." || warn "brew: bind may already be installed" ;;
+            alpine)         maybe_sudo apk add --no-cache bind-tools > "$PICKAXE_LOG" 2>&1 && success "bind-tools installed." || { err "bind-tools failed."; FAILED_TOOLS+=("dig"); } ;;
+            opensuse)       maybe_sudo zypper install -y bind-utils > "$PICKAXE_LOG" 2>&1 && success "bind-utils installed." || { err "bind-utils failed."; FAILED_TOOLS+=("dig"); } ;;
         esac
     else
         success "dig already installed: $(command -v dig)"
@@ -603,6 +710,9 @@ repair_missing() {
             debian | kali)  maybe_sudo apt-get install -y iputils-ping > "$PICKAXE_LOG" 2>&1 && success "iputils-ping installed." || { err "iputils-ping failed."; FAILED_TOOLS+=("ping"); } ;;
             arch)           maybe_sudo pacman -S --noconfirm iputils > "$PICKAXE_LOG" 2>&1 && success "iputils installed." || { err "iputils failed."; FAILED_TOOLS+=("ping"); } ;;
             rhel | fedora)  local PM="yum"; has dnf && PM="dnf"; maybe_sudo $PM install -y iputils > "$PICKAXE_LOG" 2>&1 && success "iputils installed." || { err "iputils failed."; FAILED_TOOLS+=("ping"); } ;;
+            macos)          success "ping is built-in on macOS" ;;
+            alpine)         maybe_sudo apk add --no-cache iputils > "$PICKAXE_LOG" 2>&1 && success "iputils installed." || { err "iputils failed."; FAILED_TOOLS+=("ping"); } ;;
+            opensuse)       maybe_sudo zypper install -y iputils > "$PICKAXE_LOG" 2>&1 && success "iputils installed." || { err "iputils failed."; FAILED_TOOLS+=("ping"); } ;;
         esac
     else
         success "ping already installed: $(command -v ping)"
@@ -615,7 +725,15 @@ repair_missing() {
         if ! $PY -c "import rich" 2>/dev/null; then
             warn "Python 'rich' package missing — installing…"
             needs_work=true
-            $PY -m pip install "rich>=13.7.0" --quiet && success "rich installed." || { err "rich install failed."; FAILED_TOOLS+=("rich"); }
+            # try OS package manager first
+            case "$ENV" in
+                debian | kali) maybe_sudo apt-get install -y python3-rich > "$PICKAXE_LOG" 2>&1 && success "rich installed via apt." && continue 2>/dev/null ;;
+                alpine)        maybe_sudo apk add --no-cache py3-rich > "$PICKAXE_LOG" 2>&1 && success "rich installed via apk." && continue 2>/dev/null ;;
+            esac
+            $PY -m pip install rich --break-system-packages --quiet 2>/dev/null \
+                || $PY -m pip install rich --user --quiet \
+                && success "rich installed." \
+                || { err "rich install failed."; FAILED_TOOLS+=("rich"); }
         else
             success "Python 'rich' package already installed."
         fi
@@ -691,9 +809,12 @@ print_summary() {
         echo ""
         echo -e "  ${BOLD}Troubleshooting:${NC}"
         echo -e "  • Check your internet connection."
-        echo -e "  • On Debian/Kali:   ${CYAN}sudo apt-get install -f${NC}"
-        echo -e "  • On Termux:        ${CYAN}pkg install ruby && gem install whatweb --no-document${NC}"
-        echo -e "  • Run repair mode:  ${CYAN}bash setup.sh --repair${NC}"
+        echo -e "  • Debian/Kali:  ${CYAN}sudo apt-get install -f${NC}"
+        echo -e "  • Termux:       ${CYAN}pkg install ruby && gem install whatweb --no-document${NC}"
+        echo -e "  • macOS:        ${CYAN}brew install nmap whois bind && pip install rich${NC}"
+        echo -e "  • Alpine:       ${CYAN}apk add nmap whois bind-tools py3-rich${NC}"
+        echo -e "  • openSUSE:     ${CYAN}zypper install nmap whois bind-utils python3-pip${NC}"
+        echo -e "  • Run repair:   ${CYAN}bash setup.sh --repair${NC}"
         echo -e "  • Pickaxe auto-skips missing tools at runtime."
     fi
     echo ""
@@ -744,11 +865,14 @@ main() {
 
     # ── Step 1 — OS packages ──────────────────────────────────────────────────
     case "$ENV" in
-        termux)          setup_termux  ;;
-        debian | kali)   setup_debian  ;;
-        arch)            setup_arch    ;;
-        rhel | fedora)   setup_rhel    ;;
-        *)               setup_unknown ;;
+        termux)        setup_termux   ;;
+        debian | kali) setup_debian   ;;
+        arch)          setup_arch     ;;
+        rhel | fedora) setup_rhel     ;;
+        macos)         setup_macos    ;;
+        alpine)        setup_alpine   ;;
+        opensuse)      setup_opensuse ;;
+        *)             setup_unknown  ;;
     esac
 
     # ── WhatWeb on Termux needs gem (not in pkg repos) ────────────────────────

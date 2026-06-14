@@ -95,7 +95,7 @@ python hybrid_osint.py --check
 
 ### Platform support
 
-| Platform | Package Manager | WhatWeb Source |
+| Platform | Package Manager | WhatWeb Source |python hybrid_osint.py example.com
 |----------|----------------|----------------|
 | **Termux (Android)** | `pkg` | `gem install whatweb` |
 | **Debian / Ubuntu / Kali** | `apt-get` | `apt-get install whatweb` |

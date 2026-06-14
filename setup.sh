@@ -398,11 +398,12 @@ bootstrap_pip() {
     FAILED_TOOLS+=("pip")
 }
 
-# =============================================================================
-#  PYTHON PACKAGES
-# =============================================================================
+# python packages install
+# kali/debian block pip with "externally-managed-environment" since 2023
+# try apt first, then --break-system-packages, then --user as fallback
+# no venv needed with any of these
 install_python_packages() {
-    section "Python — Installing packages from requirements.txt"
+    section "Python packages"
 
     local PY=""
     for candidate in python3 python python3.12 python3.11 python3.10 python3.9; do
@@ -418,27 +419,89 @@ install_python_packages() {
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local REQ="${SCRIPT_DIR}/requirements.txt"
 
-    if [ ! -f "$REQ" ]; then
-        warn "requirements.txt not found at ${REQ}"
-        info "Installing 'rich' directly…"
-        $PY -m pip install "rich>=13.7.0" --quiet \
-            && success "rich installed." \
-            || { err "rich install failed."; FAILED_TOOLS+=("rich"); }
-        return
+    # ── Collect packages to install ──────────────────────────────────────────
+    local PKGS=()
+    if [ -f "$REQ" ]; then
+        info "Reading packages from: ${REQ}"
+        while IFS= read -r line; do
+            # Skip blank lines and comment lines (POSIX-safe case match)
+            case "$line" in
+                ""|\#*) continue ;;
+            esac
+            PKGS+=("$line")
+        done < "$REQ"
+    else
+        warn "requirements.txt not found — installing 'rich' directly"
+        PKGS=("rich>=13.7.0")
     fi
 
-    info "Installing from: ${REQ}"
-    if $PY -m pip install -r "$REQ" --quiet; then
-        success "All Python packages installed."
-    else
-        warn "pip install failed — retrying with --user flag…"
-        if $PY -m pip install -r "$REQ" --quiet --user; then
-            success "Python packages installed (--user mode)."
-        else
-            err "pip install failed. Check internet connection and try again."
-            FAILED_TOOLS+=("python-packages")
+    info "Packages to install: ${PKGS[*]}"
+    echo ""
+
+    # try apt first on kali/debian — avoids pip entirely
+    if [ "$ENV" = "debian" ] || [ "$ENV" = "kali" ]; then
+        info "trying apt for python packages..."
+        local APT_ALL_OK=true
+        for pkg in "${PKGS[@]}"; do
+            # strip version spec to get just the package name
+            local base_name
+            base_name=$(echo "$pkg" | sed 's/[><=!].*//' | tr '[:upper:]' '[:lower:]')
+            # map pip names to apt package names
+            local apt_pkg=""
+            case "$base_name" in
+                rich)       apt_pkg="python3-rich"       ;;
+                requests)   apt_pkg="python3-requests"   ;;
+                colorama)   apt_pkg="python3-colorama"   ;;
+                dnspython)  apt_pkg="python3-dnspython"  ;;
+                *)          apt_pkg=""                   ;;
+            esac
+            if [ -n "$apt_pkg" ]; then
+                info "apt: installing ${apt_pkg}…"
+                if maybe_sudo apt-get install -y "$apt_pkg" > "$PICKAXE_LOG" 2>&1; then
+                    success "${apt_pkg} installed via apt. No venv needed."
+                else
+                    warn "apt: ${apt_pkg} unavailable — will fall through to pip."
+                    APT_ALL_OK=false
+                fi
+            else
+                warn "No apt mapping for '${base_name}' — needs pip."
+                APT_ALL_OK=false
+            fi
+        done
+        if [ "$APT_ALL_OK" = true ]; then
+            success "All packages installed via apt. No venv needed."
+            return 0
         fi
     fi
+
+
+    # kali/debian: use --break-system-packages to bypass the venv requirement
+    info "trying pip install --break-system-packages..."
+    if $PY -m pip install --break-system-packages --quiet "${PKGS[@]}" \
+        > "$PICKAXE_LOG" 2>&1; then
+        success "packages installed (--break-system-packages)"
+        return 0
+    fi
+
+    # last resort: per-user install, always works
+    warn "trying --user install..."
+    if $PY -m pip install --user --quiet "${PKGS[@]}" > "$PICKAXE_LOG" 2>&1; then
+        success "packages installed (~/.local)"
+        local LOCAL_BIN="${HOME}/.local/bin"
+        if [ -d "$LOCAL_BIN" ] && [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
+            export PATH="${LOCAL_BIN}:${PATH}"
+        fi
+        return 0
+    fi
+
+    # all three methods failed, print hints
+    err "could not install packages, try one of these manually:"
+    echo ""
+    echo -e "  ${CYAN}sudo apt install python3-rich${NC}"
+    echo -e "  ${CYAN}pip install rich --break-system-packages${NC}"
+    echo -e "  ${CYAN}pip install rich --user${NC}"
+    echo ""
+    FAILED_TOOLS+=("python-packages")
 }
 
 # =============================================================================

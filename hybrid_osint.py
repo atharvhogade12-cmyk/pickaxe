@@ -41,7 +41,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,7 +67,7 @@ VERSION = "3.0.0"
 
 CUSTOM_THEME = Theme({
     "banner":       "bold bright_cyan",
-    "header":       "bold bright_white on #1a1a2e",
+    "header":       "bold bright_white",           # hex bg removed — breaks non-truecolor terminals
     "success":      "bold bright_green",
     "warning":      "bold yellow",
     "error":        "bold bright_red",
@@ -76,12 +76,12 @@ CUSTOM_THEME = Theme({
     "field":        "bold cyan",
     "value":        "bright_white",
     "section":      "bold magenta",
-    "cve":          "bold bright_red on #2d0000",
+    "cve":          "bold bright_red",              # hex bg removed — breaks non-truecolor terminals
     "port_open":    "bold green",
     "port_closed":  "dim red",
     "dns_record":   "bright_yellow",
     "cms":          "bold bright_magenta",
-    "highlight":    "bold bright_cyan on #0d2137",
+    "highlight":    "bold bright_cyan",             # hex bg removed — breaks non-truecolor terminals
     "phish_low":    "bold bright_green",
     "phish_sus":    "bold yellow",
     "phish_likely": "bold orange1",
@@ -480,7 +480,8 @@ def _ssl_check_sync(hostname: str) -> Dict[str, Any]:
                 if expire_str:
                     try:
                         exp_dt    = datetime.strptime(expire_str, "%b %d %H:%M:%S %Y %Z")
-                        days_left = (exp_dt - datetime.utcnow()).days
+                        # datetime.utcnow() is deprecated in 3.12, use timezone-aware version
+                        days_left = (exp_dt - datetime.now(timezone.utc).replace(tzinfo=None)).days
                     except ValueError:
                         pass
 
@@ -548,13 +549,16 @@ async def run_nmap(target: str, result: ScanResult, timeout: int = 240) -> None:
     """Full TCP scan + version detection + vuln scripts. Termux/non-root safe."""
     console.log("[info]↳ Nmap:[/info] launching...")
 
-    if is_termux() or not is_root():
-        # No raw socket access without root — use TCP connect scan, skip OS detect
-        flags = ["-sT", "-sV", "-sC", "--script=vuln", "--open", "-T4", "-oN", "-"]
-        console.log("[warning]↳ Nmap:[/warning] non-root detected — using -sT (TCP connect), OS detection disabled")
+    non_root = is_termux() or not is_root()
+    if non_root:
+        # non-root requires TCP connect on specific ports
+        flags = ["-sT", "-sV", "--open", "-T4",
+                 "-p", "21,22,23,25,80,443,3306,3389,5432,6379,8080,8443,8888,9200",
+                 "-oN", "-"]
+        console.log("[warning]↳ Nmap:[/warning] non-root — TCP connect on common ports, OS detection skipped")
     else:
-        # Root: use faster SYN scan + OS fingerprint
-        flags = ["-sS", "-sV", "-sC", "--script=vuln", "-O", "--open", "-T4", "-oN", "-"]
+        # root mode allows faster SYN scans
+        flags = ["-sS", "-sV", "-O", "--open", "-T4", "-oN", "-"]
 
     stdout, stderr = await _run_subprocess(["nmap"] + flags + [target], timeout=timeout)
 
@@ -727,6 +731,15 @@ async def run_subdomains(target: str, result: ScanResult, timeout: int = 5) -> N
     # Semaphore limits concurrent subprocesses (avoid Termux OOM)
     sem = asyncio.Semaphore(12)
 
+    # filter out common wildcard DNS ranges
+    _BOGON_PREFIXES: Tuple[str, ...] = (
+        "192.0.2.",    # test ranges
+        "198.51.100.",
+        "203.0.113.",
+        "127.",        # loopback
+        "0.",          # invalid
+    )
+
     async def _check(sub: str) -> Optional[str]:
         async with sem:
             fqdn     = f"{sub}.{base}"
@@ -736,7 +749,11 @@ async def run_subdomains(target: str, result: ScanResult, timeout: int = 5) -> N
             lines = [l.strip() for l in out.strip().splitlines()
                      if l.strip() and not l.strip().startswith(";")]
             if lines and re.match(r"[\d.]+", lines[0]):
-                return f"{fqdn} [{lines[0]}]"
+                ip = lines[0]
+                # Filter wildcard DNS false positives
+                if any(ip.startswith(prefix) for prefix in _BOGON_PREFIXES):
+                    return None  # wildcard DNS hit
+                return f"{fqdn} [{ip}]"
         return None
 
     raw = await asyncio.gather(*[_check(s) for s in COMMON_SUBDOMAINS], return_exceptions=True)
@@ -1160,7 +1177,8 @@ def _make_header(result: ScanResult) -> Panel:
     if result.geo_country:
         location = ", ".join(filter(None, [result.geo_city, result.geo_region, result.geo_country]))
         grid.add_row(
-            Text(f"  🌍  Location: {location}", style="geo_info"),
+            # shows CDN edge location, not necessarily where the company is based
+            Text(f"  🌍  Anycast Node Location: {location}", style="geo_info"),
             Text(f"🏢  {result.geo_isp[:42]}" if result.geo_isp else "", style="muted"),
         )
     if result.phishing_level:
